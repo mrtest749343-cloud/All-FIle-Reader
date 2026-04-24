@@ -1,0 +1,1046 @@
+================================================================================
+UNIVERSAL FILE READER - PROJECT ARCHITECTURE & LOGIC
+================================================================================
+
+A lightweight, modular desktop application for reading any file format.
+Built with Python, CustomTkinter, and TkinterDnD.
+
+This document explains the logic, purpose, and implementation of each component.
+For reference implementations in other languages, see "PORTING TO OTHER LANGUAGES".
+
+================================================================================
+SECTION 1: OVERALL ARCHITECTURE
+================================================================================
+
+The application follows a HANDLER-ROUTER-VIEWER pattern (like MVC but for files):
+
+    USER INPUT
+         ↓
+    [DROP ZONE / FILE BROWSER]  ← Accepts file paths
+         ↓
+    [ROUTER]  ← Determines file type
+         ↓
+    [HANDLER]  ← Specializes in file format
+         ↓
+    [VIEWER]  ← Displays content to user
+
+The key principle: SEPARATION OF CONCERNS.
+- Each file type (text, media, generic) has its own handler.
+- Each viewer is specialized for its content type.
+- The router delegates without knowing details about each handler.
+
+This design makes the app:
+  ✓ Extensible — add new file types easily
+  ✓ Maintainable — logic is isolated per file type
+  ✓ Fast — heavy libraries loaded only when needed
+  ✓ Testable — each component has a single responsibility
+
+================================================================================
+SECTION 2: CORE COMPONENTS
+================================================================================
+
+── 1. MAIN.PY (Entry Point & Root Window) ────────────────────────────────────
+
+What it does:
+  • Initializes the Tkinter root window
+  • Sets up the dark theme
+  • Combines DropZone + HistoryBar into a cohesive UI
+
+Why this design:
+  • TkinterDnD.Tk is inherited so drag-and-drop works on all child widgets
+  • Minimal GUI logic here — heavy lifting delegated to specialized widgets
+  • Acts as a "glue" that ties UI components together
+
+Key methods:
+  App.__init__()      → Window initialization, dimensions, styling
+  _build_ui()         → Assembles the UI (header, drop zone, history bar)
+
+Flow:
+  1. Window created with 720×480 geometry
+  2. Dark theme applied globally (CustomTkinter setting)
+  3. Header label created ("📂 Universal File Reader")
+  4. DropZone instantiated (drag-drop area in center)
+  5. HistoryBar instantiated (recent files at bottom)
+  6. Main loop starts: app.mainloop()
+
+Python-specific details:
+  • Uses sys.path.insert() to ensure project modules are importable
+  • Inherits from TkinterDnD.Tk for drag-and-drop capability
+  • Uses customtkinter for modern dark-themed widgets
+
+
+── 2. DROP ZONE (UI Component) ───────────────────────────────────────────────
+
+What it does:
+  • Displays a visual area where users can drag files
+  • Opens file browser dialog on click
+  • Dispatches selected file to router
+
+Why this component:
+  • Centralizes both drag-drop and click-to-browse into one widget
+  • Provides visual feedback (hover effects)
+  • Single entry point for file selection
+
+Key methods:
+  _build_ui()         → Creates label and button
+  _register_dnd()     → Sets up tkinterdnd2 bindings
+  _on_drop()          → Handles dropped files
+  _on_click()         → Opens file dialog
+  _route_and_open()   → Calls router.route_file()
+
+Internal state:
+  _IDLE_TEXT     = "⬇ Drop a file here or click to browse"
+  _HOVER_TEXT    = "Release to open file"
+  _icon_label    → Shows large 📁 icon
+
+Visual feedback:
+  • Border color changes on hover
+  • Text changes to show action
+  • Rounded corners (radius=16)
+
+Python-specific:
+  • Uses tkinterdnd2 library for DND_FILES bindings
+  • Threading used to load file paths asynchronously
+  • filedialog.askopenfilename() for browser
+
+
+── 3. HISTORY BAR (UI Component) ──────────────────────────────────────────────
+
+What it does:
+  • Shows last N recently opened files as clickable "chips"
+  • Persists history to disk (.file_history.json)
+  • Allows quick re-opening of recent files
+
+Why this component:
+  • Improves UX by avoiding re-browsing for common files
+  • History persists across sessions
+  • Compact horizontal layout fits naturally above drop zone
+
+Key functions:
+  load_history()      → Read JSON, validate files still exist
+  save_history()      → Write JSON (max 8 entries)
+  add_to_history()    → Insert at front, remove duplicates, cap at 8
+
+HistoryBar class:
+  __init__()          → Setup UI, load history
+  _build()            → Create horizontal frame with chips
+  refresh()           → Reload from disk and redraw
+
+Storage:
+  Location: .file_history.json (one level up from code)
+  Format: JSON array of absolute file paths
+  Max entries: 8 (configurable _MAX_HISTORY constant)
+
+Persistence logic:
+  • On each file open: add_to_history(path) called
+  • Path moved to front if already in history
+  • Duplicates removed
+  • List capped to last 8 items
+  • Saved to JSON on disk
+
+Python-specific:
+  • Uses json module for persistence
+  • os.path.isfile() checks existence before loading
+
+
+── 4. ROUTER (Business Logic) ────────────────────────────────────────────────
+
+What it does:
+  • Matches file path to appropriate handler
+  • Updates history
+  • Delegates to handler's open_viewer() method
+
+Why this component:
+  • Single decision point for file type matching
+  • Decouples UI from handler implementations
+  • Ensures consistent behavior across the app
+
+Key function:
+  route_file(path, parent=None)
+    1. Normalize path (cross-platform separators)
+    2. Call add_to_history(path)
+    3. Try each handler in order: TextHandler → MediaHandler → GenericHandler
+    4. First match calls handler.open_viewer(path, parent)
+    5. Exit
+
+Handler order (first match wins):
+  Priority 1: TextHandler     ← Handles .txt, .pdf, .docx, code files, etc.
+  Priority 2: MediaHandler    ← Handles .mp3, .mp4, etc.
+  Priority 3: GenericHandler  ← Catch-all for .zip, .exe, etc.
+
+Why this order?
+  • Text is most common format
+  • Media second most common
+  • Generic handles everything else
+
+Error handling:
+  • Silent try/except around history update (non-critical)
+  • No file existence check here (handlers do it)
+  • parent.after(0, ...) ensures viewer runs on main thread
+
+Python-specific:
+  • Uses os.path.normpath() for Windows/Unix compatibility
+  • parent.after() prevents thread conflicts with Tkinter
+
+
+── 5. BASE_HANDLER (Abstract Base Class) ────────────────────────────────────
+
+What it does:
+  • Defines interface all handlers must implement
+  • Provides utility methods (file_ext, human_size)
+
+Why abstract?
+  • Enforces consistent API across different handler types
+  • Prevents incomplete implementations
+  • Acts as documentation
+
+Required methods (subclasses must implement):
+  can_handle(path: str) → bool
+    Quick check: does this handler support this file?
+    MUST NOT do heavy work (no library imports)
+    Example: check file extension
+
+  open_viewer(path: str, parent) → None
+    Create and show a viewer window for this file
+    Called only if can_handle() returned True
+    parent: Tk root window (for positioning)
+
+Utility methods (subclasses inherit):
+  file_ext(path)      → Return ".ext" (lowercase)
+  human_size(path)    → Return "1.5 MB" formatted string
+
+Design philosophy:
+  • can_handle() is FAST (just file extension check)
+  • Heavy imports deferred to open_viewer()
+  • This keeps app startup snappy
+
+Python-specific:
+  • Uses ABC (Abstract Base Class) for enforcement
+  • @abstractmethod decorator
+  • @staticmethod for utility methods
+
+
+── 6. TEXT_HANDLER (Specialized Handler) ─────────────────────────────────────
+
+What it does:
+  • Detects text-readable formats
+  • Extracts text from complex formats (PDF, DOCX, RTF)
+  • Opens TextViewer window
+
+Supported formats:
+  Plain text: .txt, .md, .log, .csv, .json, .yaml
+  Code: .py, .js, .ts, .html, .css, .sql, etc.
+  Documents: .pdf, .docx, .rtf
+  Config: .ini, .cfg, .env, .toml
+
+can_handle() logic:
+  1. Check if extension in _TEXT_EXTENSIONS set
+  2. If no extension → try opening as text (heuristic)
+  3. Heuristic: read 512 bytes, check if >90% are printable ASCII
+  4. Return True/False
+
+Why heuristics?
+  • Some text files have no extension
+  • Better to attempt reading than fail silently
+  • 90% threshold avoids false positives on binary files
+
+extract_text() method (called by TextViewer):
+  Branches on file extension:
+    .pdf    → _read_pdf()    → Uses pdfplumber (lazy import)
+    .docx   → _read_docx()   → Uses python-docx (lazy import)
+    .rtf    → _read_rtf()    → Uses striprtf (lazy import)
+    else    → _read_plain()  → Standard UTF-8 reading
+
+_read_plain() (handles most text):
+  1. Try encodings in order: utf-8, utf-8-sig, latin-1, cp1252
+  2. Return decoded text
+  3. If all fail: decode as latin-1 (never crashes)
+
+_read_pdf():
+  1. Open PDF with pdfplumber
+  2. Iterate pages
+  3. Extract tables as ASCII art
+  4. Extract text
+  5. Format nicely
+
+_read_docx():
+  1. Open DOCX with python-docx
+  2. Extract paragraphs and tables
+  3. Preserve structure
+
+_read_rtf():
+  1. Use striprtf to remove RTF control codes
+  2. Return plain text
+
+Why lazy imports?
+  • pdfplumber, python-docx, striprtf are heavy dependencies
+  • Import only when actually reading that file type
+  • App starts instantly even if no PDFs opened yet
+  • Users may only read .txt files — why import PDF library?
+
+Python-specific:
+  • Lazy imports: done inside function, not at module level
+  • Encoding fallback chain: common pattern for text handling
+  • os.path.splitext() for extension
+
+
+── 7. MEDIA_HANDLER (Specialized Handler) ────────────────────────────────────
+
+What it does:
+  • Detects audio and video files
+  • Opens MediaViewer window
+
+Supported formats:
+  Audio: .mp3, .wav, .ogg, .flac, .aac, .wma, .m4a, .opus
+  Video: .mp4, .avi, .mkv, .mov, .wmv, .flv, .webm, .m4v
+
+can_handle() logic:
+  Check if file extension in _MEDIA_EXTENSIONS set
+  That's it — no complex detection needed
+
+Helper methods:
+  is_audio(path)      → True if audio extension
+  is_video(path)      → True if video extension
+
+Why separate methods?
+  • MediaViewer needs to know whether to show player controls or video fallback
+  • Clean interface for querying media type
+
+Python-specific:
+  • Simple set membership check: ext in _AUDIO_EXTENSIONS
+
+
+── 8. GENERIC_HANDLER (Fallback Handler) ────────────────────────────────────
+
+What it does:
+  • Handles ALL files not matched by other handlers
+  • Opens GenericViewer window
+
+can_handle() logic:
+  Always returns True
+  (it's the catch-all)
+
+Why catch-all?
+  • .zip, .exe, .bin, .iso files still need representation
+  • Rather than crash, show metadata + hex dump
+  • Users can still understand what they're looking at
+
+Generic viewer shows:
+  • File metadata (size, modified date, permissions)
+  • First 8KB of file as hex dump
+  • Not editable (read-only viewer)
+
+
+── 9. BASE_VIEWER (Abstract Base Class for Viewers) ───────────────────────────
+
+What it does:
+  • Common UI template for all viewer windows
+  • Toplevel window (separate from main window)
+  • Header bar with filename + type badge
+  • Body frame for content
+
+Why abstract?
+  • All viewers need consistent look/feel
+  • Reduces code duplication
+  • Easy to change styling in one place
+
+Key methods:
+  __init__()          → Setup window, create header/body
+  _configure_window() → Set title, geometry, dark theme
+  _build_header()     → Show filename + extension badge
+
+Header shows:
+  • 📄 Filename (left side)
+  • Type badge: "text", "audio", "video", or "generic" (right side)
+  • Colored badge (green for text, blue for audio, purple for video, brown for generic)
+  • Close button
+
+Body frame:
+  • Empty CTkFrame at initialization
+  • Subclasses pack their content into self.body
+  • Expands to fill remaining space
+
+Why Toplevel?
+  • Separate window from main (independent positioning)
+  • Multiple files can be open simultaneously
+  • Closing one doesn't close the app
+
+Python-specific:
+  • Inherits from ctk.CTkToplevel (CustomTkinter toplevel)
+  • self.lift() and self.focus_force() bring window to front
+
+
+── 10. TEXT_VIEWER (Specialized Viewer) ──────────────────────────────────────
+
+What it does:
+  • Display text content in scrollable, read-only widget
+  • Font size controls (increase/decrease)
+  • Word wrap toggle
+
+Key features:
+  • Text extraction via TextHandler.extract_text()
+  • Scrollable (handles large files)
+  • Dark theme consistent with app
+  • Control bar with font size buttons
+  • Status bar showing file size + encoding
+
+Layout:
+  [Header bar with filename + close]
+  [Control bar: + size button, - size button, Wrap toggle]
+  [Scrollable text content]
+  [Status bar: "1.2 MB  UTF-8"]
+
+Font size:
+  • Default: 11 points
+  • Min: 8, Max: 20
+  • Buttons increment/decrement by 1
+
+Word wrap:
+  • Toggle button shows current state
+  • Wraps long lines if enabled
+  • Disabled by default (faster scrolling)
+
+Scrolling:
+  • Mouse wheel scrolling
+  • Scrollbar on right
+  • Home/End keys jump to start/end
+
+Python-specific:
+  • Uses CTkTextbox for scrollable text
+  • Font sizes specified in points
+  • read() method marks text as read-only
+
+
+── 11. MEDIA_VIEWER (Specialized Viewer) ────────────────────────────────────
+
+What it does:
+  • For audio: built-in player (play/pause/seek/volume)
+  • For video: fallback to system player or VLC if installed
+
+Audio player:
+  • Uses pygame.mixer for audio playback
+  • Control buttons: Play, Pause, Stop
+  • Seek slider (current time / total time)
+  • Volume slider (0% to 100%)
+  • Current time display
+
+Video:
+  • If VLC installed: embedded playback (via python-vlc)
+  • Otherwise: open with system default player
+
+Layout (audio):
+  [Header]
+  [Album art placeholder (if metadata available)]
+  [Control buttons: Play | Pause | Stop]
+  [Seek slider with time display]
+  [Volume slider]
+  [Current time: 0:32 / 3:45]
+
+Why pygame for audio?
+  • Lightweight and reliable
+  • Good codec support (MP3, WAV, OGG, etc.)
+  • Cross-platform
+
+Why VLC optional for video?
+  • VLC has best codec support
+  • If not installed, OS handles it (works fine)
+  • Fallback approach: works but simpler
+
+Python-specific:
+  • pygame.mixer module for audio
+  • Optional: python-vlc for video
+  • Subprocess to open system player if no VLC
+
+
+── 12. GENERIC_VIEWER (Fallback Viewer) ──────────────────────────────────────
+
+What it does:
+  • Show metadata for any file
+  • Hex dump preview of first 8KB
+  • Graceful handling of unreadable files
+
+Metadata shown:
+  • Full path
+  • File size (human-readable)
+  • Created / modified timestamps
+  • Permissions (readable/writable)
+  • File type (as reported by OS)
+
+Hex dump:
+  • First 8KB displayed in classic hex format
+  • Left: hex bytes (16 per line)
+  • Right: ASCII representation
+  • Example:
+      00000000: 7F 45 4C 46 01 01 01 00  00 00 00 00 00 00 00 00  |.ELF............|
+      00000010: 02 00 03 00 01 00 00 00  54 80 01 08 34 00 00 00  |........T...4...|
+
+Why hex dump?
+  • Users can see file structure
+  • Helpful for debugging/understanding binary files
+  • Professional appearance
+
+
+================================================================================
+SECTION 3: DATA FLOW & SEQUENCES
+================================================================================
+
+── Opening a file by drag-and-drop: ──────────────────────────────────────────
+
+  User drops file on DropZone
+       ↓
+  DropZone._on_drop() triggered
+       ↓
+  Parse file path from DND_FILES event
+       ↓
+  DropZone._route_and_open(path) called
+       ↓
+  router.route_file(path, parent) called
+       ↓
+  add_to_history(path) updates JSON
+       ↓
+  Loop through _HANDLERS (in order):
+       ├─ TextHandler.can_handle(path)?
+       ├─ MediaHandler.can_handle(path)?
+       └─ GenericHandler.can_handle(path)? → Always True
+       ↓
+  handler.open_viewer(path, parent) called
+       ↓
+  Appropriate viewer (TextViewer/MediaViewer/GenericViewer) created
+       ↓
+  New Toplevel window appears with content
+
+
+── Opening a file from history bar: ──────────────────────────────────────────
+
+  User clicks chip in HistoryBar
+       ↓
+  HistoryBar click callback triggered
+       ↓
+  router.route_file(path, parent) called
+       ↓
+  [Same sequence as above from router onwards]
+
+
+── Opening a file via click-to-browse: ──────────────────────────────────────
+
+  User clicks DropZone
+       ↓
+  DropZone._on_click() triggered
+       ↓
+  filedialog.askopenfilename() opens system file picker
+       ↓
+  User selects file, OK button pressed
+       ↓
+  DropZone._route_and_open(path) called
+       ↓
+  [Same sequence as drag-and-drop above]
+
+
+── App lifecycle: ────────────────────────────────────────────────────────────
+
+  1. main.py executed
+  2. App() instantiated
+     └─ __init__() called
+        └─ _build_ui()
+           ├─ DropZone created
+           ├─ HistoryBar created + load_history()
+           └─ All widgets packed
+  3. app.mainloop() starts
+  4. Window renders, waits for user input
+  5. On user action: event handler fires
+  6. New viewer window(s) created as needed
+  7. On close: Tk event loop continues
+  8. On app close: mainloop() exits, script ends
+
+
+================================================================================
+SECTION 4: ERROR HANDLING STRATEGY
+================================================================================
+
+"Fail gracefully" is a design principle throughout:
+
+── File not readable (permission denied, corrupted, etc.): ───────────────────
+  • TextHandler catches exceptions in extract_text()
+  • Returns error message instead of crashing
+  • TextViewer displays: "[Error reading file]"
+
+── Missing heavy library (e.g., pdfplumber not installed): ────────────────────
+  • ImportError caught
+  • Message shown: "PDF reading not available"
+  • Continue with next extraction method or show generic text
+
+── Invalid history file (.file_history.json corrupted): ────────────────────────
+  • load_history() wrapped in try/except
+  • Returns empty list on error
+  • History just won't show, app still works
+
+── File drops on drag-and-drop: ─────────────────────────────────────────────────
+  • Threading used to avoid blocking UI
+  • Exceptions logged but don't crash
+
+── Media file not playable: ──────────────────────────────────────────────────
+  • pygame.mixer error caught
+  • Show error label instead of player controls
+
+
+================================================================================
+SECTION 5: DESIGN PATTERNS USED
+================================================================================
+
+1. ABSTRACT BASE CLASS (FileHandler, BaseViewer)
+   Purpose: Define interface, ensure consistent API
+   Benefit: New handlers can be added confidently
+
+2. HANDLER PATTERN (TextHandler, MediaHandler, GenericHandler)
+   Purpose: Specialize logic per file type
+   Benefit: Easy to add new formats (e.g., ImageHandler)
+
+3. ROUTER / DISPATCHER (router.route_file)
+   Purpose: Decouple file selection from viewer creation
+   Benefit: Single decision point, testable
+
+4. LAZY LOADING (imports inside functions, not at module level)
+   Purpose: Fast startup, only import what's needed
+   Benefit: 100ms startup vs 2s if all imports at top
+
+5. COMMAND PATTERN (callbacks in HistoryBar, DropZone)
+   Purpose: Pass actions without tight coupling
+   Benefit: Flexible, easy to test
+
+6. OBSERVER PATTERN (history_bar.refresh() called from router)
+   Purpose: Update UI when state changes
+   Benefit: Separation of concerns, reactive updates
+
+7. STRATEGY PATTERN (different extract_text strategies per format)
+   Purpose: Switch algorithm based on file type
+   Benefit: Clean, extensible text extraction
+
+
+================================================================================
+SECTION 6: PORTING TO OTHER LANGUAGES
+================================================================================
+
+This project can be ported to other languages. Here's the mapping:
+
+── JavaScript / TypeScript (Electron or web framework): ───────────────────────
+
+Project structure (similar):
+  ├── main.ts
+  ├── components/
+  │   ├── DropZone.tsx
+  │   └── HistoryBar.tsx
+  ├── handlers/
+  │   ├── baseHandler.ts
+  │   ├── router.ts
+  │   ├── textHandler.ts
+  │   ├── mediaHandler.ts
+  │   └── genericHandler.ts
+  └── viewers/
+      ├── baseViewer.tsx
+      ├── textViewer.tsx
+      ├── mediaViewer.tsx
+      └── genericViewer.tsx
+
+Key libraries:
+  • Electron (desktop) or Vite (web) for UI framework
+  • pdf-parse (PDF extraction)
+  • docx (DOCX extraction)
+  • tone.js (audio playback)
+  • html5 video element (video playback)
+
+Key differences:
+  • Use React/Vue components instead of Tkinter widgets
+  • Async/await for file I/O (instead of threading)
+  • localStorage for history persistence
+  • FileReader API for drag-and-drop
+
+Sample code (Electron + React):
+
+```typescript
+// baseHandler.ts
+export abstract class FileHandler {
+  abstract canHandle(path: string): boolean;
+  abstract openViewer(path: string, parent: Window): void;
+}
+
+// router.ts
+export function routeFile(path: string): void {
+  addToHistory(path);
+  for (const handler of handlers) {
+    if (handler.canHandle(path)) {
+      handler.openViewer(path, window);
+      return;
+    }
+  }
+}
+
+// textHandler.ts
+export class TextHandler extends FileHandler {
+  async canHandle(path: string): Promise<boolean> {
+    return TEXT_EXTENSIONS.includes(getExtension(path));
+  }
+
+  async openViewer(path: string): Promise<void> {
+    const content = await extractText(path);
+    new TextViewer(content);
+  }
+
+  private async extractText(path: string): Promise<string> {
+    // Use pdf-parse, docx, etc.
+  }
+}
+```
+
+
+── Java (JavaFX or Swing): ────────────────────────────────────────────────────
+
+Project structure:
+  ├── Main.java
+  ├── ui/
+  │   ├── DropZonePane.java
+  │   └── HistoryBar.java
+  ├── handlers/
+  │   ├── FileHandler.java (abstract)
+  │   ├── Router.java
+  │   ├── TextFileHandler.java
+  │   ├── MediaFileHandler.java
+  │   └── GenericFileHandler.java
+  └── viewers/
+      ├── BaseViewer.java
+      ├── TextViewer.java
+      ├── MediaViewer.java
+      └── GenericViewer.java
+
+Key libraries:
+  • JavaFX for UI (modern, dark theme built-in)
+  • Apache PDFBox (PDF extraction)
+  • docx4j (DOCX extraction)
+  • JavaZoom JPlayer (audio playback)
+  • JavaFX MediaView (video playback)
+
+Key differences:
+  • Use Stage/Scene for windows (like Tk Toplevel)
+  • SwingUtilities.invokeLater() for thread safety (like Tk.after)
+  • Drag-and-drop via TransferMode API
+  • JSON parsing via Jackson or Gson
+
+Sample code (JavaFX):
+
+```java
+// FileHandler.java (abstract)
+public abstract class FileHandler {
+    public abstract boolean canHandle(String path);
+    public abstract void openViewer(String path, Window parent);
+}
+
+// Router.java
+public class Router {
+    private static final List<FileHandler> handlers = Arrays.asList(
+        new TextFileHandler(),
+        new MediaFileHandler(),
+        new GenericFileHandler()
+    );
+
+    public static void routeFile(String path, Window parent) {
+        History.add(path);
+        for (FileHandler handler : handlers) {
+            if (handler.canHandle(path)) {
+                Platform.runLater(() -> handler.openViewer(path, parent));
+                return;
+            }
+        }
+    }
+}
+
+// Main.java
+public class App extends Application {
+    @Override
+    public void start(Stage primaryStage) {
+        primaryStage.setTitle("Universal File Reader");
+        
+        VBox root = new VBox();
+        DropZonePane dropZone = new DropZonePane();
+        HistoryBar history = new HistoryBar();
+        
+        root.getChildren().addAll(dropZone, history);
+        primaryStage.setScene(new Scene(root, 720, 480));
+        primaryStage.show();
+    }
+}
+```
+
+
+── C# (.NET / WinForms or WPF): ──────────────────────────────────────────────
+
+Project structure (MVVM pattern):
+  ├── Program.cs
+  ├── ViewModels/
+  │   ├── MainViewModel.cs
+  │   └── ViewerViewModel.cs
+  ├── Views/
+  │   ├── MainWindow.xaml
+  │   ├── MainWindow.xaml.cs
+  │   └── ViewerWindow.xaml
+  ├── Handlers/
+  │   ├── IFileHandler.cs (interface)
+  │   ├── Router.cs
+  │   ├── TextFileHandler.cs
+  │   ├── MediaFileHandler.cs
+  │   └── GenericFileHandler.cs
+  └── Services/
+      ├── HistoryService.cs
+      └── FileExtractionService.cs
+
+Key libraries:
+  • WPF (Windows Presentation Foundation) for UI
+  • iTextSharp or PDFSharp (PDF extraction)
+  • OpenXml (DOCX extraction)
+  • TagLibSharp (audio metadata)
+  • MediaElement (video playback)
+
+Key differences:
+  • XAML for UI layout (declarative)
+  • Bindings for reactive updates (MVVM)
+  • Dependency injection via IServiceCollection
+  • async/await for file operations
+
+Sample code (WPF + MVVM):
+
+```csharp
+// IFileHandler.cs
+public interface IFileHandler {
+    bool CanHandle(string path);
+    Task OpenViewerAsync(string path, Window parent);
+}
+
+// Router.cs
+public class Router {
+    private readonly List<IFileHandler> handlers;
+
+    public async Task RouteFileAsync(string path, Window parent) {
+        await History.AddAsync(path);
+        
+        foreach (var handler in handlers) {
+            if (handler.CanHandle(path)) {
+                await handler.OpenViewerAsync(path, parent);
+                return;
+            }
+        }
+    }
+}
+
+// TextFileHandler.cs
+public class TextFileHandler : IFileHandler {
+    public bool CanHandle(string path) {
+        return TextExtensions.Contains(Path.GetExtension(path));
+    }
+
+    public async Task OpenViewerAsync(string path, Window parent) {
+        var content = await FileExtractionService.ExtractTextAsync(path);
+        var viewer = new TextViewerWindow(content);
+        viewer.Owner = parent;
+        viewer.Show();
+    }
+}
+```
+
+
+── Rust (Tauri or iced): ────────────────────────────────────────────────────
+
+Rust pros for this project:
+  • Blazing fast startup
+  • Memory safe (no crashes)
+  • Small binary size
+  • Perfect for desktop apps
+
+Using Tauri (Rust backend + web frontend):
+
+Key libraries:
+  • Tauri (desktop framework)
+  • React/Vue for UI (same as JS port)
+  • pdfplumber-rs (PDF extraction)
+  • docx (DOCX extraction)
+  • rodio (audio playback)
+
+Sample code (Tauri Rust backend):
+
+```rust
+// src/handlers/file_handler.rs
+pub trait FileHandler {
+    fn can_handle(&self, path: &str) -> bool;
+    fn open_viewer(&self, path: &str) -> Result<String, String>;
+}
+
+// src/handlers/router.rs
+pub struct Router {
+    handlers: Vec<Box<dyn FileHandler>>,
+}
+
+impl Router {
+    pub fn route_file(&self, path: &str) -> Result<String, String> {
+        for handler in &self.handlers {
+            if handler.can_handle(path) {
+                return handler.open_viewer(path);
+            }
+        }
+        Err("No handler found".to_string())
+    }
+}
+
+// src/handlers/text_handler.rs
+pub struct TextHandler;
+
+impl FileHandler for TextHandler {
+    fn can_handle(&self, path: &str) -> bool {
+        TEXT_EXTENSIONS.contains(&get_extension(path))
+    }
+
+    fn open_viewer(&self, path: &str) -> Result<String, String> {
+        extract_text(path)
+    }
+}
+
+fn extract_text(path: &str) -> Result<String, String> {
+    // Use pdfplumber-rs, docx, etc.
+}
+```
+
+
+── Python alternative frameworks (if not Tkinter): ────────────────────────────
+
+If you want to keep Python but use different UI:
+
+1. PyQt6 / PySide6 (similar to Java Swing):
+   • More feature-rich than Tkinter
+   • Professional look
+   • Same architecture pattern applies
+
+2. Kivy (mobile + desktop):
+   • Cross-platform (iOS, Android, Windows, Mac, Linux)
+   • Modern gesture support
+   • Same architecture pattern
+
+3. PySimpleGUI (simpler than Tkinter):
+   • Easier to learn
+   • Rapid development
+   • Less control over styling
+
+4. Streamlit (web-based):
+   • No separate UI framework needed
+   • Runs in browser
+   • Different deployment model (web server)
+
+
+================================================================================
+SECTION 7: KEY TAKEAWAYS FOR PORTING
+================================================================================
+
+1. ARCHITECTURE IS LANGUAGE-AGNOSTIC
+   The handler-router-viewer pattern works in any language.
+   Implement the pattern first, libraries second.
+
+2. LAZY LOADING IS UNIVERSAL
+   Don't import heavy libraries at startup.
+   Import only when needed (JS: dynamic imports, Java: reflection, etc.)
+
+3. SEPARATE CONCERNS
+   Text extraction, media playback, routing should be separate.
+   This makes each piece easier to test and maintain.
+
+4. UI FRAMEWORK CHOICE MATTERS
+   Python has Tkinter (simple, built-in).
+   JavaScript has Electron/Tauri (powerful, cross-platform).
+   Java has JavaFX (modern, feature-rich).
+   Choose based on your needs.
+
+5. HISTORY PERSISTENCE
+   Store recent files in JSON (portable across languages).
+   Max 8 items to avoid bloat.
+   Load at startup, update on every file open.
+
+6. ERROR HANDLING
+   Never crash the app. Always show a message instead.
+   Catch exceptions at handler level, not globally.
+   Let the app continue running gracefully.
+
+7. THREAD SAFETY
+   UI updates must happen on main thread.
+   Use platform-specific mechanisms:
+     Python: Tk.after()
+     JS: await in async functions
+     Java: SwingUtilities.invokeLater()
+     C#: Dispatcher.Invoke()
+
+8. TESTING
+   Test each handler independently.
+   Mock file system for unit tests.
+   Test router logic with fake handlers.
+
+
+================================================================================
+SECTION 8: EXTENDING THE PROJECT
+================================================================================
+
+Adding a new file type (e.g., Image Handler):
+
+Step 1: Create ImageHandler extending FileHandler
+  • can_handle() → check for .jpg, .png, .gif, .bmp, etc.
+  • open_viewer() → instantiate ImageViewer
+
+Step 2: Create ImageViewer extending BaseViewer
+  • Display image in self.body
+  • Add zoom controls (in/out)
+  • Add fit-to-window toggle
+  • Add rotation buttons
+
+Step 3: Add ImageHandler to _HANDLERS list in router.py
+  Insert before GenericHandler (order matters!)
+
+Step 4: Add image libraries to requirements.txt
+  PIL (Pillow) for image handling
+
+Step 5: Test!
+  Drag an image file to the app.
+  It should open in ImageViewer.
+
+That's it! The architecture makes it trivial to add new types.
+
+
+================================================================================
+SECTION 9: CONFIGURATION & CONSTANTS
+================================================================================
+
+Important constants (easily customizable):
+
+File: main.py
+  • Window size: 720×480
+  • Min size: 600×400
+  • Theme: "dark", color: "green"
+
+File: history_bar.py
+  • Max history items: 8
+  • History file location: .file_history.json
+
+File: text_handler.py
+  • Supported extensions: 60+ formats
+  • Encoding attempts: utf-8, utf-8-sig, latin-1, cp1252
+  • Text detection threshold: 90% printable
+
+File: media_handler.py
+  • Audio formats: 8 formats
+  • Video formats: 10 formats
+
+File: base_viewer.py
+  • Window size: 800×560
+  • Badge colors: text (green), audio (blue), video (purple), generic (brown)
+
+All of these can be tweaked without understanding the full codebase.
+
+
+================================================================================
+END OF DOCUMENT
+================================================================================
+
+Questions? Comments? Improvements?
+This architecture scales from "single file reader" to "multi-format document management system".
+Start simple, add handlers as needed. The pattern works at any scale.

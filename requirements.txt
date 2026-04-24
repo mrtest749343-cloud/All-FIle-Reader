@@ -1,0 +1,19 @@
+# ── Core UI ──────────────────────────────────────────────────────────────────
+customtkinter>=5.2.0
+tkinterdnd2>=0.3.0
+
+# ── Text / document readers ───────────────────────────────────────────────────
+pdfplumber>=0.10.0          # PDF text extraction (preferred)
+PyPDF2>=3.0.0               # PDF fallback
+python-docx>=1.1.0          # .docx support
+
+# ── Audio playback ───────────────────────────────────────────────────────────
+pygame>=2.5.0               # Audio player (mp3, wav, ogg, flac…)
+
+# ── Duration metadata (optional but nice-to-have) ────────────────────────────
+mutagen>=1.47.0             # Audio file duration / tags
+
+# ── Video (optional — install separately if needed) ──────────────────────────
+# python-vlc>=3.0.0         # Uncomment for embedded video playback
+#   → also requires VLC media player installed on the system
+#   → https://www.videolan.org/vlc/
